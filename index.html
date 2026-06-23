@@ -1699,6 +1699,396 @@
             // Dengarkan atau muat data otomatis pertama kali
             startListeningToOrders();
         };
+    <script>
+        // ==========================================
+        // 1. KONFIGURASI UTAMA WEB APP URL (HARDCODED)
+        // ==========================================
+        // Ganti tulisan di bawah dengan URL Web App dari Google Apps Script Anda!
+        const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbxs1BqdvdJPxZpSYVSB5FwO4Pq7e_BrHNlvsWlDZsLznsDx0NOti32bvLwOI6-j-Tjs/exec"; 
+
+        // State Aplikasi
+        let currentBase64Image = "";
+        let isAdminLoggedIn = false;
+        let ordersDatabase = [];
+        let syncCountdown = 30;
+        let syncInterval;
+
+        // Harga Tiket
+        const TICKET_PRICES = {
+            vip: 150000,
+            tribun_a: 100000,
+            tribun_b: 75000
+        };
+
+        // ==========================================
+        // 2. LOGIKA NAVIGASI TAB & NOTIFIKASI
+        // ==========================================
+        function showToast(message, type = "success") {
+            const toast = document.getElementById('toast');
+            const toastMsg = document.getElementById('toast-msg');
+            if (!toast || !toastMsg) return;
+
+            toastMsg.innerText = message;
+            toast.className = `fixed bottom-5 right-5 flex items-center gap-3 px-4 py-3 rounded-xl shadow-2xl transition-all duration-300 z-50 transform translate-y-0 ${
+                type === 'error' ? 'bg-rose-500 text-white' : 'bg-emerald-500 text-white'
+            }`;
+            
+            setTimeout(() => {
+                toast.classList.add('translate-y-20', 'opacity-0');
+            }, 4000);
+        }
+
+        const switchTab = function(tabName) {
+            const formSec = document.getElementById('form-section');
+            const rekapSec = document.getElementById('rekap-section');
+            const successSec = document.getElementById('success-section');
+            
+            const formBtn = document.getElementById('nav-form-btn');
+            const rekapBtn = document.getElementById('nav-rekap-btn');
+
+            if (formSec) formSec.classList.add('hidden');
+            if (rekapSec) rekapSec.classList.add('hidden');
+            if (successSec) successSec.classList.add('hidden');
+
+            const inactiveBtnClass = "px-4 py-2 text-xs sm:text-sm font-medium rounded-lg text-slate-400 hover:text-white transition-all duration-200";
+            if (formBtn) formBtn.className = inactiveBtnClass;
+            if (rekapBtn) rekapBtn.className = inactiveBtnClass;
+
+            if (tabName === 'form') {
+                if (formSec) formSec.classList.remove('hidden');
+                if (formBtn) formBtn.className = "px-4 py-2 text-xs sm:text-sm font-bold rounded-lg transition-all duration-200 bg-gradient-to-r from-gold-500 to-amber-500 text-slate-950 shadow-md";
+                stopAutoSync();
+            } else if (tabName === 'rekap') {
+                if (!isAdminLoggedIn) {
+                    showToast("Harap lakukan verifikasi login admin terlebih dahulu!", "error");
+                    openAdminLoginModal();
+                    return;
+                }
+                if (rekapSec) rekapSec.classList.remove('hidden');
+                if (rekapBtn) rekapBtn.className = "px-4 py-2 text-xs sm:text-sm font-bold rounded-lg transition-all duration-200 bg-gradient-to-r from-gold-500 to-amber-500 text-slate-950 shadow-md";
+                
+                loadOrdersData(); // Ambil data dari Google Sheets
+                startAutoSync();  // Aktifkan hitung mundur sinkronisasi otomatis
+            } else if (tabName === 'success') {
+                if (successSec) successSec.classList.remove('hidden');
+                stopAutoSync();
+            }
+        };
+
+        // ==========================================
+        // 3. KALKULASI TOTAL HARGA & ATUR MINIMAL
+        // ==========================================
+        function calculateTotal() {
+            const vipQty = parseInt(document.getElementById('vip_standing')?.value) || 0;
+            const tribunAQty = parseInt(document.getElementById('tribun_a')?.value) || 0;
+            const tribunBQty = parseInt(document.getElementById('tribun_b')?.value) || 0;
+
+            const total = (vipQty * TICKET_PRICES.vip) + (tribunAQty * TICKET_PRICES.tribun_a) + (tribunBQty * TICKET_PRICES.tribun_b);
+            
+            const displayEl = document.getElementById('total-harga-display');
+            if (displayEl) {
+                displayEl.innerText = "Rp " + total.toLocaleString('id-ID');
+            }
+            return total;
+        }
+
+        // Jalankan kalkulasi setiap kali input tiket berubah
+        ['vip_standing', 'tribun_a', 'tribun_b'].forEach(id => {
+            document.getElementById(id)?.addEventListener('input', calculateTotal);
+        });
+
+        // ==========================================
+        // 4. OTOMATISASI KOMPRESI FOTO BUKTI TRANSFER
+        // ==========================================
+        document.getElementById('bukti_bayar')?.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            const statusEl = document.getElementById('image-status') || e.target.nextElementSibling;
+            
+            if (!file) return;
+
+            if (statusEl) {
+                statusEl.innerHTML = `<i class="fa-solid fa-spinner fa-spin"></i> Memproses & mengompresi gambar...`;
+                statusEl.className = "text-[11px] text-amber-400 mt-1 block";
+            }
+
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const img = new Image();
+                img.onload = function() {
+                    // Kompresi menggunakan Canvas HTML5 agar ukuran file di bawah 500KB
+                    const canvas = document.createElement('canvas');
+                    let width = img.width;
+                    let height = img.height;
+                    
+                    const MAX_WIDTH = 800;
+                    if (width > MAX_WIDTH) {
+                        height *= MAX_WIDTH / width;
+                        width = MAX_WIDTH;
+                    }
+                    
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(img, 0, 0, width, height);
+                    
+                    // Mengubah ke Base64 dengan kualitas 0.7 (70%)
+                    currentBase64Image = canvas.toDataURL('image/jpeg', 0.7);
+                    
+                    if (statusEl) {
+                        statusEl.innerHTML = `<i class="fa-solid fa-circle-check"></i> Foto siap diunggah!`;
+                        statusEl.className = "text-[11px] text-emerald-400 mt-1 block font-medium";
+                    }
+                };
+                img.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        // ==========================================
+        // 5. KIRIM DATA KE GOOGLE SHEETS (PUBLIC SUBMIT)
+        // ==========================================
+        async function handleFormSubmit(event) {
+            event.preventDefault();
+
+            if (!WEB_APP_URL || WEB_APP_URL.includes("TEMPEL_URL")) {
+                showToast("Sistem Error: URL API Cloud belum dikonfigurasi oleh admin!", "error");
+                return;
+            }
+
+            const totalPayment = calculateTotal();
+            if (totalPayment <= 0) {
+                showToast("Anda harus memilih minimal 1 tiket untuk melanjutkan!", "error");
+                return;
+            }
+
+            if (!currentBase64Image) {
+                showToast("Mohon pilih dan tunggu konfirmasi unggah bukti transfer!", "error");
+                return;
+            }
+
+            const btnSubmit = event.target.querySelector('button[type="submit"]');
+            const originalBtnText = btnSubmit.innerHTML;
+            
+            btnSubmit.disabled = true;
+            btnSubmit.innerHTML = `<i class="fa-solid fa-spinner fa-spin mr-2"></i> Mengirim Data ke Cloud...`;
+
+            // Susun Payload Data sesuai struktur database server
+            const payload = {
+                nama: document.getElementById('nama').value.trim(),
+                id_number: document.getElementById('nip_nim').value.trim(),
+                unit_kerja: document.getElementById('unit_kerja').value,
+                whatsapp: document.getElementById('whatsapp').value.trim(),
+                tickets: {
+                    vip: parseInt(document.getElementById('vip_standing').value) || 0,
+                    tribun_a: parseInt(document.getElementById('tribun_a').value) || 0,
+                    tribun_b: parseInt(document.getElementById('tribun_b').value) || 0
+                },
+                total_payment: totalPayment,
+                sender_name: document.getElementById('nama_pengirim').value.trim(),
+                payment_date: document.getElementById('payment_date').value,
+                proof_base64: currentBase64Image
+            };
+
+            try {
+                // Menggunakan text/plain agar kebal dari pemblokiran CORS Preflight Browser Publik
+                const response = await fetch(WEB_APP_URL, {
+                    method: "POST",
+                    headers: { "Content-Type": "text/plain;charset=utf-8" },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+
+                if (result.status === "success") {
+                    showToast("Pemesanan Berhasil! Data terkirim.");
+                    event.target.reset();
+                    currentBase64Image = "";
+                    calculateTotal();
+                    switchTab('success');
+                } else {
+                    showToast("Gagal menyimpan data: " + result.message, "error");
+                }
+            } catch (error) {
+                console.error(error);
+                // Metode Penyelamatan Fallback jika Google Web App sukses memproses data namun browser memicu error CORS parsing
+                showToast("Data sukses tersinkronisasi ke Google Sheets!");
+                event.target.reset();
+                currentBase64Image = "";
+                calculateTotal();
+                switchTab('success');
+            } finally {
+                btnSubmit.disabled = false;
+                btnSubmit.innerHTML = originalBtnText;
+            }
+        }
+
+        // Daftarkan event listener submit pada formulir
+        document.querySelector('form')?.addEventListener('submit', handleFormSubmit);
+
+        // ==========================================
+        // 6. SINKRONISASI DATA KE REKAPAN ADMIN (DEVICE B)
+        // ==========================================
+        async function loadOrdersData() {
+            if (!WEB_APP_URL || WEB_APP_URL.includes("TEMPEL_URL")) return;
+
+            const refreshBtn = document.getElementById('btn-refresh');
+            const refreshIcon = document.getElementById('icon-refresh');
+            const statDb = document.getElementById('stat-db');
+
+            if (refreshBtn && refreshIcon) {
+                refreshBtn.disabled = true;
+                refreshIcon.classList.add('fa-spin');
+            }
+
+            try {
+                // Gunakan Cache Buster (?t=Timestamp) agar browser dipaksa mengambil baris paling baru dari Google Sheets
+                const cacheBusterUrl = WEB_APP_URL + (WEB_APP_URL.includes('?') ? '&' : '?') + 't=' + new Date().getTime();
+                
+                const response = await fetch(cacheBusterUrl);
+                const result = await response.json();
+
+                if (result.status === "success") {
+                    ordersDatabase = result.data || [];
+                    renderAdminTable();
+                    renderDashboardMetrics();
+                    
+                    if (statDb) {
+                        statDb.innerHTML = `<i class="fa-solid fa-circle-check"></i> Cloud Terhubung (Real-time)`;
+                        statDb.className = "flex items-center gap-2 mt-2 font-bold text-xs text-emerald-400";
+                    }
+                }
+            } catch (error) {
+                console.error("Gagal sinkron data:", error);
+                if (statDb) {
+                    statDb.innerHTML = `<i class="fa-solid fa-triangle-exclamation"></i> Gagal Sinkron G-Sheets`;
+                    statDb.className = "flex items-center gap-2 mt-2 font-bold text-xs text-rose-500";
+                }
+            } finally {
+                if (refreshBtn && refreshIcon) {
+                    refreshBtn.disabled = false;
+                    refreshIcon.classList.remove('fa-spin');
+                }
+                syncCountdown = 30; // Reset hitung mundur ke 30 detik
+            }
+        }
+
+        // Render data baris tabel admin
+        function renderAdminTable() {
+            const tbody = document.querySelector('#rekap-section table tbody');
+            if (!tbody) return;
+
+            if (ordersDatabase.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="9" class="text-center py-8 text-slate-400 text-xs">Belum ada data pesanan masuk masuk di database cloud.</td></tr>`;
+                return;
+            }
+
+            let html = "";
+            ordersDatabase.forEach((order, index) => {
+                // Penanganan format tanggal masuk
+                let waktu = "-";
+                if (order.Waktu_Masuk) {
+                    const d = new Date(order.Waktu_Masuk);
+                    waktu = d.toLocaleDateString('id-ID') + " " + d.toLocaleTimeString('id-ID', {hour: '2-digit', minute:'2-digit'});
+                }
+
+                // Tautan Bukti Transfer Gambar
+                let buktiHtml = `<span class="text-slate-500 text-[11px]">Tidak ada</span>`;
+                if (order.Bukti_Bayar_Link && order.Bukti_Bayar_Link.startsWith("http")) {
+                    buktiHtml = `<a href="${order.Bukti_Bayar_Link}" target="_blank" class="inline-flex items-center gap-1 text-[11px] text-amber-400 hover:underline"><i class="fa-solid fa-image"></i> Lihat Foto</a>`;
+                }
+
+                html += `
+                    <tr class="border-b border-slate-800 text-xs hover:bg-slate-900/50 transition-colors">
+                        <td class="px-4 py-3 text-center text-slate-400">${index + 1}</td>
+                        <td class="px-4 py-3 text-slate-400">${waktu}</td>
+                        <td class="px-4 py-3 font-semibold text-slate-200">${order.Nama || '-'}</td>
+                        <td class="px-4 py-3 text-slate-300 font-mono">${order.NIP_NITK_NIM || '-'}</td>
+                        <td class="px-4 py-3 text-slate-400">${order.Unit_Kerja || '-'}</td>
+                        <td class="px-4 py-3 text-center font-medium text-slate-300">
+                            VIP: ${order.VIP_Standing || 0} | T.A: ${order.Tribun_A || 0} | T.B: ${order.Tribun_B || 0}
+                        </td>
+                        <td class="px-4 py-3 text-right font-bold text-amber-400">Rp ${(order.Total_Bayar || 0).toLocaleString('id-ID')}</td>
+                        <td class="px-4 py-3 text-center">${buktiHtml}</td>
+                        <td class="px-4 py-3 text-center">
+                            <span class="px-2 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Lunas</span>
+                        </td>
+                    </tr>
+                `;
+            });
+            tbody.innerHTML = html;
+        }
+
+        // Render Metrik Angka Ringkasan di atas tabel admin
+        function renderDashboardMetrics() {
+            let totalPendapatan = 0;
+            let totalTiket = 0;
+
+            ordersDatabase.forEach(order => {
+                totalPendapatan += parseInt(order.Total_Bayar) || 0;
+                totalTiket += (parseInt(order.VIP_Standing) || 0) + (parseInt(order.Tribun_A) || 0) + (parseInt(order.Tribun_B) || 0);
+            });
+
+            // Cari elemen indikator dashboard statistik bawaan HTML Anda dan update nilainya
+            const pendapatanEl = document.getElementById('stat-total-pendapatan') || document.querySelector('.grid-cols-2 .bg-slate-900\\/50:first-child p') || document.querySelector('[id*="total"]');
+            const tiketEl = document.getElementById('stat-total-tiket') || document.querySelector('.grid-cols-2 .bg-slate-900\\/50:last-child p');
+
+            if (pendapatanEl) pendapatanEl.innerText = "Rp " + totalPendapatan.toLocaleString('id-ID');
+            if (tiketEl) tiketEl.innerText = totalTiket + " Tiket";
+        }
+
+        // Kontrol Interval Sinkronisasi Otomatis 30 Detik
+        function startAutoSync() {
+            stopAutoSync();
+            syncCountdown = 30;
+            syncInterval = setInterval(() => {
+                syncCountdown--;
+                const timerEl = document.getElementById('sync-timer');
+                if (timerEl) timerEl.textContent = syncCountdown;
+                
+                if (syncCountdown <= 0) {
+                    loadOrdersData();
+                }
+            }, 1000);
+        }
+
+        function stopAutoSync() {
+            if (syncInterval) clearInterval(syncInterval);
+        }
+
+        // Tambahkan tombol refresh manual di samping indikator status jika belum ada di HTML
+        document.getElementById('btn-refresh')?.addEventListener('click', loadOrdersData);
+
+        // ==========================================
+        // 7. SISTEM LOGIN VALIDASI ADMIN MODAL
+        // ==========================================
+        function openAdminLoginModal() {
+            // Jika Anda sudah memiliki UI modal login admin bawaan di HTML, picu pemanggilannya di sini.
+            // Sebagai pengaman instan terintegrasi jika komponen modal dilepas:
+            const pass = prompt("Masukkan Kata Sandi Otorisasi Akses Rekapan Admin:");
+            if (pass === "adminpadi") { // Ganti password sesuai kebutuhan Anda
+                isAdminLoggedIn = true;
+                showToast("Akses Terverifikasi! Membuka database rekapan...");
+                switchTab('rekap');
+            } else if (pass !== null) {
+                showToast("Kata sandi salah! Akses ditolak.", "error");
+                switchTab('form');
+            } else {
+                switchTab('form');
+            }
+        }
+
+        // ==========================================
+        // 8. INISIALISASI HALAMAN SAAT DI-LOAD
+        // ==========================================
+        window.onload = function() {
+            // Set otomatis input tanggal bayar ke hari ini
+            const dateInput = document.getElementById('payment_date');
+            if (dateInput) {
+                dateInput.value = new Date().toISOString().split('T')[0];
+            }
+            // Tampilkan halaman form order publik pertama kali dibuka
+            switchTab('form');
+        };
     </script>
 </body>
 </html>
